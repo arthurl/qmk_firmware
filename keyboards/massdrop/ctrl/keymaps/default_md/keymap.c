@@ -21,6 +21,81 @@ enum ctrl_keycodes {
     MD_BOOT             //Restart into bootloader after hold timeout                //Working
 };
 
+typedef union {
+    uint32_t raw;
+    struct {
+        uint8_t led_animation_id: 3,
+                led_lighting_mode: 2,
+                led_animation_breathing: 1,
+                led_enabled: 1,
+                led_animation_direction: 1;
+        uint8_t gcr_desired;
+        uint8_t led_animation_speed;
+        uint8_t nkro: 1,
+                _unused: 7;
+    };
+} kb_config_t;
+
+kb_config_t kb_config;
+
+void load_saved_settings(void) {
+    kb_config.raw = eeconfig_read_kb();
+
+    led_animation_id = kb_config.led_animation_id;
+    gcr_desired = kb_config.gcr_desired;
+    led_lighting_mode = kb_config.led_lighting_mode;
+    keymap_config.nkro = kb_config.nkro;
+
+    bool prev_led_animation_breathing = led_animation_breathing;
+    led_animation_breathing = kb_config.led_animation_breathing;
+    if (led_animation_breathing && !prev_led_animation_breathing) {
+        gcr_breathe = gcr_desired;
+        led_animation_breathe_cur = BREATHE_MIN_STEP;
+        breathe_dir = 1;
+    }
+
+    led_animation_direction = kb_config.led_animation_direction;
+    led_animation_speed = kb_config.led_animation_speed;
+
+    bool led_enabled = kb_config.led_enabled;
+    I2C3733_Control_Set(led_enabled);
+}
+
+void save_settings(void) {
+    // Save the keyboard config to EEPROM
+    eeconfig_update_kb(kb_config.raw);
+}
+
+void sync_settings(void) {
+    save_settings();
+    load_saved_settings();
+}
+
+// overrides weak symbol in tmk_core/common/keyboard.c
+void keyboard_post_init_kb(void) {
+   load_saved_settings();
+}
+
+// overrides weak symbol in tmk_core/common/keyboard.c
+void eeconfig_init_kb(void) {
+   kb_config.raw = 0;
+   kb_config.led_animation_id = 0;
+   kb_config.led_lighting_mode = 0;
+   kb_config.led_animation_breathing = false;
+   kb_config.led_enabled = true;
+   kb_config.led_animation_direction = 1;
+   kb_config.gcr_desired = LED_GCR_MAX;
+   kb_config.led_animation_speed = 4;
+   kb_config.nkro = keymap_config.nkro;
+
+   save_settings();
+}
+
+void led_set_enabled(bool enabled) {
+    kb_config.led_enabled = enabled;
+    sync_settings();
+}
+
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     [0] = LAYOUT(
         KC_ESC,  KC_F1,   KC_F2,   KC_F3,   KC_F4,   KC_F5,   KC_F6,   KC_F7,   KC_F8,   KC_F9,   KC_F10,  KC_F11,  KC_F12,             KC_PSCR, KC_SLCK, KC_PAUS, \
@@ -68,73 +143,69 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     switch (keycode) {
         case L_BRI:
             if (record->event.pressed) {
-                if (LED_GCR_STEP > LED_GCR_MAX - gcr_desired) gcr_desired = LED_GCR_MAX;
-                else gcr_desired += LED_GCR_STEP;
-                if (led_animation_breathing) gcr_breathe = gcr_desired;
+                int brightness = kb_config.gcr_desired + LED_GCR_STEP;
+                kb_config.gcr_desired = brightness > LED_GCR_MAX ? LED_GCR_MAX : brightness;
+                sync_settings();
             }
             return false;
         case L_BRD:
             if (record->event.pressed) {
-                if (LED_GCR_STEP > gcr_desired) gcr_desired = 0;
-                else gcr_desired -= LED_GCR_STEP;
-                if (led_animation_breathing) gcr_breathe = gcr_desired;
+                int brightness = kb_config.gcr_desired - LED_GCR_STEP;
+                kb_config.gcr_desired = brightness < 0 ? 0 : brightness;
+                sync_settings();
             }
             return false;
         case L_PTN:
             if (record->event.pressed) {
-                if (led_animation_id == led_setups_count - 1) led_animation_id = 0;
-                else led_animation_id++;
+                kb_config.led_animation_id = (kb_config.led_animation_id + 1) % led_setups_count;
+                sync_settings();
             }
             return false;
         case L_PTP:
             if (record->event.pressed) {
-                if (led_animation_id == 0) led_animation_id = led_setups_count - 1;
-                else led_animation_id--;
+                kb_config.led_animation_id = (kb_config.led_animation_id - 1) % led_setups_count;
+                sync_settings();
             }
             return false;
         case L_PSI:
             if (record->event.pressed) {
-                led_animation_speed += ANIMATION_SPEED_STEP;
+                kb_config.led_animation_speed += ANIMATION_SPEED_STEP;
+                sync_settings();
             }
             return false;
         case L_PSD:
             if (record->event.pressed) {
-                led_animation_speed -= ANIMATION_SPEED_STEP;
-                if (led_animation_speed < 0) led_animation_speed = 0;
+                kb_config.led_animation_speed = kb_config.led_animation_speed < 1
+                    ? 0
+                    : kb_config.led_animation_speed - ANIMATION_SPEED_STEP;
+                sync_settings();
             }
             return false;
         case L_T_MD:
             if (record->event.pressed) {
-                led_lighting_mode++;
-                if (led_lighting_mode > LED_MODE_MAX_INDEX) led_lighting_mode = LED_MODE_NORMAL;
+                kb_config.led_lighting_mode = (kb_config.led_lighting_mode + 1) % LED_MODE_MAX_INDEX;
+                sync_settings();
             }
             return false;
         case L_T_ONF:
             if (record->event.pressed) {
-                led_enabled = !led_enabled;
-                I2C3733_Control_Set(led_enabled);
+                led_set_enabled(!kb_config.led_enabled);
             }
             return false;
         case L_ON:
             if (record->event.pressed) {
-                led_enabled = 1;
-                I2C3733_Control_Set(led_enabled);
+                led_set_enabled(true);
             }
             return false;
         case L_OFF:
             if (record->event.pressed) {
-                led_enabled = 0;
-                I2C3733_Control_Set(led_enabled);
+                led_set_enabled(false);
             }
             return false;
         case L_T_BR:
             if (record->event.pressed) {
-                led_animation_breathing = !led_animation_breathing;
-                if (led_animation_breathing) {
-                    gcr_breathe = gcr_desired;
-                    led_animation_breathe_cur = BREATHE_MIN_STEP;
-                    breathe_dir = 1;
-                }
+                kb_config.led_animation_breathing = !led_animation_breathing;
+                sync_settings();
             }
             return false;
         case L_T_PTD:
@@ -174,6 +245,12 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
                 if (timer_elapsed32(key_timer) >= 500) {
                     reset_keyboard();
                 }
+            }
+            return false;
+        case NK_TOGG:
+            if (record->event.pressed) {
+                kb_config.nkro = !kb_config.nkro;
+                sync_settings();
             }
             return false;
         default:
